@@ -18,8 +18,8 @@
 #ifndef __ATOMVM_ADC_H__
 #define __ATOMVM_ADC_H__
 
-#include <globalcontext.h>
-#include <nifs.h>
+#include "context.h"
+#include "nifs.h"
 
 void atomvm_adc_init(GlobalContext *global);
 const struct Nif *atomvm_adc_get_nif(const char *nifname);

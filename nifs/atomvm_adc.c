@@ -23,7 +23,10 @@
 
 #include <context.h>
 #include <defaultatoms.h>
+#include <erl_nif_priv.h>
+#include <globalcontext.h>
 #include <interop.h>
+#include <module.h>
 #include <nifs.h>
 #include <term.h>
 
@@ -36,10 +39,12 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 
-
 #include <stdlib.h>
 
-#define TAG "adc_resource"
+#include <esp32_sys.h>
+#include <sys.h>
+
+#define TAG "atomvm_adc"
 
 #define CHECK_ERROR(ctx, err, msg)                                                      \
 if (UNLIKELY(err != ESP_OK)) {                                                          \
@@ -58,7 +63,7 @@ struct ADCResource
     adc_oneshot_unit_handle_t adc_handle;
 };
 
-#define TAG "atomvm_adc"
+
 #define DEFAULT_SAMPLES 64
 #define DEFAULT_VREF 1100
 
@@ -233,7 +238,7 @@ static adc_channel_t get_channel(avm_int_t pin_val)
 }
 
 static const AtomStringIntPair bit_width_table[] = {
-    { ATOM_STR("\xA", "bit_defult"), (ADC_BITWIDTH_DEFAULT) },
+    { ATOM_STR("\xa", "bit_defult"), (ADC_BITWIDTH_DEFAULT) },
     { ATOM_STR("\x5", "bit_9"), ADC_BITWIDTH_9 },
     { ATOM_STR("\x6", "bit_10"), ADC_BITWIDTH_10 },
     { ATOM_STR("\x6", "bit_11"), ADC_BITWIDTH_11 },
@@ -251,12 +256,12 @@ static const AtomStringIntPair attenuation_table[] = {
 };
 
 static const char *const invalid_pin_atom   = ATOM_STR("\xb", "invalid_pin");
-static const char *const invalid_unit_adc_atom  = ATOM_STR("\xb", "invalid_unit_adc");
+//static const char *const invalid_unit_adc_atom  = ATOM_STR("\x10", "invalid_unit_adc");
 static const char *const invalid_width_atom = ATOM_STR("\xd", "invalid_width");
 static const char *const invalid_db_atom    = ATOM_STR("\xa", "invalid_db");
-static const char *const default_db   = ATOM_STR("\x5", "bit_12");
-static const char *const default_width   = ATOM_STR("\xa", "bit_defult");
-static const char *const error_read = ATOM_STR("\xA", "error_read");
+//static const char *const default_db   = ATOM_STR("\x5", "bit_12");
+//static const char *const default_width   = ATOM_STR("\xa", "bit_defult");
+static const char *const error_read = ATOM_STR("\xa", "error_read");
 #ifdef CONFIG_AVM_ADC2_ENABLE
 static const char *const timeout_atom = ATOM_STR("\x7", "timeout");
 #endif
@@ -361,10 +366,10 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
 {
     UNUSED(argc);
     GlobalContext *global = ctx->global;
-    term adc_unit_value = argv[0];
+    term opts = argv[0];
 
     adc_unit_t adc_num = ADC_UNIT_1;
-    term peripheral = interop_kv_get_value(opts, ATOM_STR("\xA", "peripheral"), global);
+    term peripheral = interop_kv_get_value(opts, ATOM_STR("\xa", "peripheral"), global);
     if (!term_is_invalid_term(peripheral)) {
         if (!term_is_integer(peripheral)) {
             ESP_LOGE(TAG, "Invalid parameter: peripheral is not an integer");
@@ -422,7 +427,7 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
 
     struct ADCResource *rsrc_obj = enif_alloc_resource(adc_resource_type, sizeof(struct ADCResource));
     if (IS_NULL_PTR(rsrc_obj)) {
-        adc_driver_delete(adc_num);
+        enif_release_resource(rsrc_obj);
         ESP_LOGW(TAG, "Failed to allocate memory: %s:%i.\n", __FILE__, __LINE__);
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
@@ -431,7 +436,6 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
 
 
     if (UNLIKELY(memory_ensure_free(ctx, TERM_BOXED_RESOURCE_SIZE) != MEMORY_GC_OK)) {
-        adc_driver_delete(adc_num);
         enif_release_resource(rsrc_obj);
         ESP_LOGW(TAG, "Failed to allocate memory: %s:%i.\n", __FILE__, __LINE__);
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
@@ -446,7 +450,6 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
     // {'$adc', Resource :: resource(), Ref :: reference()} :: adc()
     size_t requested_size = TUPLE_SIZE(3) + REF_SIZE;
     if (UNLIKELY(memory_ensure_free_with_roots(ctx, requested_size, 1, &obj, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
-        adc_driver_delete(adc_num);
         ESP_LOGW(TAG, "Failed to allocate memory: %s:%i.\n", __FILE__, __LINE__);
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
@@ -481,11 +484,6 @@ static term nif_adc_close(Context *ctx, int argc, term argv[])
         RAISE_ERROR(BADARG_ATOM);
     }
 
-    esp_err_t err;
-
-    err = adc_driver_delete(rsrc_obj->adc_enum);
-    CHECK_ERROR(ctx, err, "nif_close; Failed to delete driver");
-
     return OK_ATOM;
 }
 
@@ -519,11 +517,11 @@ static term nif_config_channel_bitwidth_atten(Context *ctx, int argc, term argv[
     term config_options = argv[2];
     VALIDATE_VALUE(config_options, term_is_list);
 
-    term bitwidth = interop_kv_get_value_default(config_options, ATOM_STR("\x8", "bitwidth"), default_width, ctx->global);
+    term bitwidth = interop_kv_get_value_default(config_options, ATOM_STR("\x8", "bitwidth"), FALSE_ATOM, ctx->global);
     VALIDATE_VALUE(bitwidth, term_is_atom);
-    adc_bits_width_t bit_width = interop_atom_term_select_int(bit_width_table, bitwidth, ctx->global);
+    adc_bitwidth_t bit_width = interop_atom_term_select_int(bit_width_table, bitwidth, ctx->global);
 
-    term attenuation = interop_kv_get_value_default(config_options, ATOM_STR("\x5", "atten"), default_db, ctx->global);
+    term attenuation = interop_kv_get_value_default(config_options, ATOM_STR("\x5", "atten"), FALSE_ATOM, ctx->global);
     VALIDATE_VALUE(attenuation, term_is_atom);
     adc_atten_t atten = interop_atom_term_select_int(attenuation_table, attenuation, ctx->global);
 
@@ -545,8 +543,7 @@ static term nif_config_channel_bitwidth_atten(Context *ctx, int argc, term argv[
 
     adc_unit_t adc_unit = adc_unit_from_pin(term_to_int(pin));
     if (UNLIKELY(adc_unit != rsrc_obj->adc_num)) {
-        int Pin = term_to_int(pin);
-        TRACE("Pin %i is not a valid adc pin.\n", Pin);
+        TRACE("Pin %i is not a valid adc pin.\n", term_to_int(pin));
         if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
             RAISE_ERROR(OUT_OF_MEMORY_ATOM);
         } else {
@@ -596,7 +593,7 @@ static term nif_config_channel_calibration(Context *ctx, int argc, term argv[])
     term config_options = argv[2];
     VALIDATE_VALUE(config_options, term_is_list);
 
-    term attenuation = interop_kv_get_value_default(config_options, ATOM_STR("\x5", "atten"), default_db, ctx->global);
+    term attenuation = interop_kv_get_value_default(config_options, ATOM_STR("\x5", "atten"), FALSE_ATOM, ctx->global);
     VALIDATE_VALUE(attenuation, term_is_atom);
     adc_atten_t atten = interop_atom_term_select_int(attenuation_table, attenuation, ctx->global);
 
@@ -610,8 +607,7 @@ static term nif_config_channel_calibration(Context *ctx, int argc, term argv[])
 
     adc_unit_t adc_unit = adc_unit_from_pin(term_to_int(pin));
     if (UNLIKELY(adc_unit != rsrc_obj->adc_num)) {
-        int Pin = term_to_int(pin);
-        TRACE("Pin %i is not a valid adc pin.\n", Pin);
+        TRACE("Pin %i is not a valid adc pin.\n", term_to_int(pin));
         if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
             RAISE_ERROR(OUT_OF_MEMORY_ATOM);
         } else {
@@ -621,7 +617,7 @@ static term nif_config_channel_calibration(Context *ctx, int argc, term argv[])
 
     //-------------ADC Calibration Init---------------//
     adc_cali_handle_t adc_cali_chan_handle = NULL;
-    bool do_calibration = adc_calibration_init(rsrc_obj->adc_enum, channel, atten, &adc_cali_chan_handle);
+    bool do_calibration = adc_calibration_init(rsrc_obj->adc_num, channel, atten, &adc_cali_chan_handle);
 
     esp_err_t err;
 
@@ -671,8 +667,7 @@ static term nif_adc_take_reading(Context *ctx, int argc, term argv[])
 
     adc_unit_t adc_unit = adc_unit_from_pin(term_to_int(pin));
     if (UNLIKELY(adc_unit != rsrc_obj->adc_num)) {
-        int Pin = term_to_int(pin);
-        TRACE("Pin %i is not a valid adc pin.\n", Pin);
+        TRACE("Pin %i is not a valid adc pin.\n", term_to_int(pin));
         if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
             RAISE_ERROR(OUT_OF_MEMORY_ATOM);
         } else {
@@ -680,16 +675,15 @@ static term nif_adc_take_reading(Context *ctx, int argc, term argv[])
         }
     }
 
-    uint32_t AdcRawValueChannel = 0;
-    uint32_t AdcVoltageChannel = 0;
+    int AdcRawValueChannel = 0;
+    int AdcVoltageChannel = 0;
 
     uint32_t adc_reading = 0;
 
-    esp_err_t err;
-
+    esp_err_t err = ESP_OK;
     
     for (avm_int_t i = 0; i < samples_val; ++i) {
-            err = adc_oneshot_read(rsrc_obj->adc_handle, channel, &AdcRawValueChannel)
+            err = adc_oneshot_read(rsrc_obj->adc_handle, channel, &AdcRawValueChannel);
             adc_reading += AdcRawValueChannel;
         }
 
@@ -706,7 +700,7 @@ static term nif_adc_take_reading(Context *ctx, int argc, term argv[])
 
     raw = raw == TRUE_ATOM ? term_from_int32(adc_reading) : UNDEFINED_ATOM;
     if (voltage == TRUE_ATOM) {
-        adc_cali_raw_to_voltage(rsrc_obj->adc_handle, channel, &AdcVoltageChannel);
+        //adc_cali_raw_to_voltage(rsrc_obj->adc_handle, channel, &AdcVoltageChannel);
         voltage = term_from_int32(AdcVoltageChannel);
     } else {
         voltage = UNDEFINED_ATOM;
@@ -749,10 +743,6 @@ static void adc_resource_dtor(ErlNifEnv *caller_env, void *obj)
     UNUSED(caller_env);
     struct ADCResource *rsrc_obj = (struct ADCResource *) obj;
 
-    esp_err_t err = adc_driver_delete(rsrc_obj->adc_num);
-    if (UNLIKELY(err != ESP_OK)) {
-        TRACE("Failed to delete driver in resource d'tor.  err=%i", err);
-    }
 }
 
 static const ErlNifResourceTypeInit ADCResourceTypeInit = {
